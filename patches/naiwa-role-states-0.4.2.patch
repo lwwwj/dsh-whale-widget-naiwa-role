@@ -1,0 +1,438 @@
+--- assets/whale-widget.js (0.4.2 原始)
++++ assets/whale-widget.js (奶蛙状态机补丁 v7)
+@@ -1341,7 +1341,7 @@
+ // loadRoles() 异步完成后会再校验：角色仍在则保持，被删则回退默认。
+ var initRoleUrl = IMG_URL
+ try {
+-  var initRoleId = localStorage.getItem('dshw-role') || ''
++  var initRoleId = localStorage.getItem('dshw-role') || 'state0'
+   if (initRoleId && initRoleId !== 'default') initRoleUrl = '/dsh-whale/role-image.png?id=' + encodeURIComponent(initRoleId)
+ } catch (err) {}
+ img.src = initRoleUrl
+@@ -6516,6 +6516,12 @@
+   } catch (err) {}
+ }
+ function resDelRole(id) {
++  // 补丁（v5/v6）：形象机在用的角色受保护，删掉形象机就废了
++  if (clickFaceProtectedRole(id)) {
++    try { alert('「奶蛙」系列角色正在被形象机使用，不能在这里删除。\n要换形象请替换 %USERPROFILE%\.dsh\whale-roles 里的 state0..5.png。') } catch (err) {}
++    return
++  }
++
+   var r = null
+   for (var i = 0; i < roleList.length; i++) if (roleList[i].id === id) { r = roleList[i]; break }
+   showConfirm('确定删除角色「' + (r ? r.name : id) + '」吗？\n若该角色正被使用,将自动回退默认小鲸鱼。', function () {
+@@ -6625,6 +6631,8 @@
+ }
+ function resRenderData(wrap, roles, bubbleImgs, audio) {
+   try {
++    // 补丁（v5）：资源管理里的角色列表/计数同样只算白名单里的角色
++    roles = clickFaceVisibleRoles(roles)
+     wrap.innerHTML = ''
+     var groups = (audio && Array.isArray(audio.groups)) ? audio.groups : []
+     var fragsAll = (audio && Array.isArray(audio.fragments)) ? audio.fragments : []
+@@ -19969,6 +19977,341 @@
+ // —— 自定义角色：列表 / 选择 / 置顶 / 删除 / 导入裁剪 ——
+ var ROLE_URL = '/dsh-whale/roles.json'
+ var currentRole = { id: 'default', name: '小鲸鱼', url: IMG_URL }
++/* dshwv-clickface-patch v7 */
++
++// ===== 补丁：六状态形象机（0 初始 / 1 大笑 / 2 安迪 / 3 思考 / 4 完成 / 5 打字-叉腰指点）=====
++var CLICKFACE = {
++  autoRole: 'state0',     // 浏览器没有角色选择记录时自动选中的角色
++  idle: 'state0',         // 静止态
++  thinking: 'state3',     // DSH 思考/生成中
++  typing: 'state5',       // 用户正在输入框里打字（叉腰指点）
++  typingIdleMs: 900,      // 最后一次输入之后多久离开打字态
++  done: 'state4',         // 每轮任务结束
++  doneMs: 1500,           // 完成态**最短**持续时长（任务结束音比它长时按语音时长算，见 clickFaceDoneHold）
++  doneTailMs: 600,        // 任务结束音播完之后再多停这么久（与 doneMs 一起决定完成态总时长）
++  shake: true,            // 点击态轻微抖动
++  volume: 0.95,
++  // 角色选择列表的白名单（v5）：只让「奶蛙(初始形象)」与插件自带的小鲸鱼出现在「角色」面板与
++  // 资源管理里；其余状态图（state1..4）不列出来 —— 它们仍然在 roles.json 里，补丁按 URL 直接换图。
++  showRoles: ['default', 'state0'],
++  // 点击按顺序循环：奶蛙大笑(2.5s) → 安迪(1s)
++  clicks: [
++    { state: 'state1', ms: 2500, voice: { url: '/dsh-whale/audio-fragment.wav?id=nailong_laugh', maxMs: 2600, name: '奶蛙笑声' } },
++    { state: 'state2', ms: 1000, voice: { url: '/dsh-whale/audio-fragment.wav?id=andi', maxMs: 1600, name: '安迪' } }
++  ],
++}
++var clickFaceTimer = null
++var clickFaceStopTimer = null
++var clickFaceShakeTimer = null
++var clickFaceAudio = null
++var clickFaceClickIdx = 0
++var clickFaceHold = false    // 正在显示点击态(1/2)
++var clickFaceFlash = false   // 正在显示完成态(4)
++var clickFaceShown = ''      // 当前显示的补丁状态 id（''= 没接管）
++function clickFaceRoleUrl(id) { return '/dsh-whale/role-image.png?id=' + encodeURIComponent(id) }
++// 是否是形象机正在用的角色（这些不允许在界面里删除，删了形象机就废了）
++function clickFaceProtectedRole(id) {
++  try {
++    if (!id) return false
++    if (id === CLICKFACE.idle || id === CLICKFACE.thinking || id === CLICKFACE.done || id === CLICKFACE.typing) return true
++    var cs = CLICKFACE.clicks || []
++    for (var i = 0; i < cs.length; i++) if (cs[i].state === id) return true
++  } catch (err) {}
++  return false
++}
++// 角色列表白名单过滤（v5）：角色面板、资源管理里的角色列表都走这里，只留 CLICKFACE.showRoles 里的角色。
++function clickFaceVisibleRoles(list) {
++  try {
++    var show = CLICKFACE.showRoles
++    if (!show || !show.length) return list || []
++    return (list || []).filter(function (r) { return r && show.indexOf(r.id) >= 0 })
++  } catch (err) { return list || [] }
++}
++// 只在这个角色被选中时接管（避免干扰用户自己挑的其它角色）
++function clickFaceCfg() {
++  try { return !!(currentRole && currentRole.id === CLICKFACE.idle) } catch (err) { return false }
++}
++function clickFaceShake(on) {
++  try { if (on) img.classList.add('dshwv-clickface-shake'); else img.classList.remove('dshwv-clickface-shake') } catch (err) {}
++}
++// 抖动关键帧（只注入一次；不动 img 的内联 transform，避免跟插件自己的变换打架）
++try {
++  var _cfStyle = document.createElement('style')
++  _cfStyle.id = 'dshwv-clickface-style'
++  _cfStyle.textContent =
++    '@keyframes dshwvClickFaceShake{' +
++    '0%{transform:translateY(0) rotate(-1.5deg) scale(1)}' +
++    '100%{transform:translateY(-3px) rotate(1.5deg) scale(1.03)}}' +
++    '.dshwv-img.dshwv-clickface-shake{animation:dshwvClickFaceShake .22s ease-in-out infinite alternate;transform-origin:50% 100%;will-change:transform}'
++  document.head.appendChild(_cfStyle)
++} catch (err) {}
++// 换图 + 用插件自己的 setupHitTest 重算该图轮廓（命中画布与 clip-path 都会跟着换）
++function clickFaceDraw(id, url) {
++  try {
++    if (!url) url = clickFaceRoleUrl(id)
++    clickFaceShown = id || ''
++    if (img.getAttribute('data-cf-src') === url) return
++    img.setAttribute('data-cf-src', url)
++    img.src = url
++    try { if (typeof setupHitTest === 'function') setupHitTest(url) } catch (err) {}
++  } catch (err) {}
++}
++function clickFaceBase() {
++  try { return { id: (currentRole && currentRole.id) || 'default', url: (currentRole && currentRole.url) || IMG_URL } }
++  catch (err) { return { id: 'default', url: IMG_URL } }
++}
++function clickFaceShow(id, ms) {
++  clickFaceDraw(id)
++  if (clickFaceTimer) { clearTimeout(clickFaceTimer); clickFaceTimer = null }
++  if (Number(ms) > 0) {
++    clickFaceTimer = setTimeout(function () { clickFaceTimer = null; clickFaceReturn() }, Math.max(200, Number(ms)))
++  }
++}
++// 回到「该显示的东西」：还在思考 → state3；否则基础形象
++function clickFaceReturn() {
++  clickFaceHold = false
++  clickFaceFlash = false
++  if (clickFaceTyping()) { clickFaceShow(CLICKFACE.typing, 0); return }
++  if (clickFaceCfg() && clickFaceThinking()) { clickFaceShow(CLICKFACE.thinking, 0); return }
++  var b = clickFaceBase()
++  clickFaceDraw(b.id, b.url)
++}
++function playClickFaceSound(url, vol, maxMs) {
++  try {
++    if (!url || !soundOn) return
++    if (clickFaceAudio) { try { clickFaceAudio.pause() } catch (err) {} clickFaceAudio = null }
++    if (clickFaceStopTimer) { clearTimeout(clickFaceStopTimer); clickFaceStopTimer = null }
++    if (typeof dshwvWarm === 'function') { try { dshwvWarm([url]) } catch (err) {} }
++    var a = dshwvSound(url)
++    a.volume = Math.max(0, Math.min(1, typeof vol === 'number' ? vol : soundVol))
++    var p = a.play()
++    if (p && typeof p.catch === 'function') p.catch(function () {})
++    clickFaceAudio = a
++    var lim = Number(maxMs) || 0
++    if (lim > 0) {
++      clickFaceStopTimer = setTimeout(function () {
++        clickFaceStopTimer = null
++        try { if (clickFaceAudio === a) a.pause() } catch (err) {}
++      }, lim)
++    }
++  } catch (err) {}
++}
++// DSH 是否在思考/生成：① 前端自己的状态标记 ② 刚发出消息（发出去就当作在做任务，直到本轮结束）
++var clickFaceSendTs = 0
++// v6：用户正在输入框里打字的截止时刻（打字 → 叉腰指点 state5）
++var clickFaceTypingUntil = 0
++function clickFaceMarkSend() { clickFaceSendTs = Date.now(); clickFaceTypingUntil = 0 }
++function clickFaceTyping() {
++  try { return !!(CLICKFACE.typing && clickFaceTypingUntil && Date.now() < clickFaceTypingUntil) } catch (err) { return false }
++}
++// 打字时立刻换成「叉腰指点」；停手后交给 500ms 轮询切回思考态/初始形象
++function clickFaceMarkTyping() {
++  try {
++    if (!CLICKFACE.typing || !clickFaceCfg()) return
++    clickFaceTypingUntil = Date.now() + Math.max(200, Number(CLICKFACE.typingIdleMs) || 900)
++    if (clickFaceHold || clickFaceFlash) return
++    if (clickFaceShown !== CLICKFACE.typing) clickFaceShow(CLICKFACE.typing, 0)
++  } catch (err) {}
++}
++function clickFaceThinking() {
++  try {
++    if (document.querySelector('[data-state="ongoing"]')) return true
++    if (document.querySelector('[data-shimmer]')) return true
++    if (document.querySelector('[data-running]')) return true
++    var bs = document.querySelectorAll('button')
++    for (var i = 0; i < bs.length; i++) {
++      var b = bs[i]
++      var lab = String(b.getAttribute('aria-label') || '') + ' ' + String(b.title || '') + ' ' + String(b.getAttribute('data-testid') || '')
++      if (/停止|中断|stop generating|stopGenerating/i.test(lab)) return true
++    }
++  } catch (err) {}
++  // 兜底信号：用户刚把话发出去（Enter 或点发送按钮）⇒ 在下一轮任务结束前都算「思考中」。
++  // 上限 30 分钟，避免某次没发出去/没收到轮次结束信号时永远停在 state3。
++  try { if (clickFaceSendTs && Date.now() - clickFaceSendTs < 30 * 60 * 1000) return true } catch (err) {}
++  return false
++}
++// 听「用户发出消息」：输入框里回车（不带修饰键）或点发送按钮
++try {
++  document.addEventListener('keydown', function (e) {
++    try {
++      if (e.key !== 'Enter' || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return
++      var t = e.target
++      if (!t) return
++      var tag = String(t.tagName || '').toLowerCase()
++      if (tag !== 'textarea' && !t.isContentEditable) return
++      clickFaceMarkSend()
++    } catch (err) {}
++  }, true)
++  document.addEventListener('click', function (e) {
++    try {
++      var el = e.target
++      var b = el && el.closest ? el.closest('button') : null
++      if (!b) return
++      var lab = String(b.getAttribute('aria-label') || '') + ' ' + String(b.title || '')
++      if (/发送|提交|send/i.test(lab)) clickFaceMarkSend()
++    } catch (err) {}
++  }, true)
++  // v6：输入框里打字 → 打字态。只认「不是挂件自己面板」里的 textarea / contenteditable。
++  var _cfIsComposer = function (t) {
++    try {
++      if (!t) return false
++      var tag = String(t.tagName || '').toLowerCase()
++      if (tag !== 'textarea' && !t.isContentEditable) return false
++      if (typeof root !== 'undefined' && root && root.contains && root.contains(t)) return false
++      return true
++    } catch (err) { return false }
++  }
++  document.addEventListener('input', function (e) { if (_cfIsComposer(e.target)) clickFaceMarkTyping() }, true)
++  document.addEventListener('compositionupdate', function (e) { if (_cfIsComposer(e.target)) clickFaceMarkTyping() }, true)
++  document.addEventListener('paste', function (e) { if (_cfIsComposer(e.target)) clickFaceMarkTyping() }, true)
++  document.addEventListener('keydown', function (e) {
++    try {
++      if (e.ctrlKey || e.altKey || e.metaKey || e.isComposing) return
++      if (e.key && e.key.length === 1 && _cfIsComposer(e.target)) clickFaceMarkTyping()
++    } catch (err) {}
++  }, true)
++} catch (err) {}
++// 点击 → 交替切 1/2 + 对应语音
++function clickFaceSwap() {
++  try {
++    if (!clickFaceCfg()) return
++    var list = CLICKFACE.clicks || []
++    if (!list.length) return
++    var c = list[clickFaceClickIdx % list.length]
++    clickFaceClickIdx++
++    clickFaceHold = true
++    clickFaceFlash = false
++    var ms = Math.max(200, Number(c.ms) || 1000)
++    clickFaceShow(c.state, ms)
++    if (CLICKFACE.shake) {
++      clickFaceShake(true)
++      if (clickFaceShakeTimer) { clearTimeout(clickFaceShakeTimer); clickFaceShakeTimer = null }
++      clickFaceShakeTimer = setTimeout(function () { clickFaceShakeTimer = null; clickFaceShake(false) }, ms)
++    }
++    if (c.voice) playClickFaceSound(c.voice.url, CLICKFACE.volume, c.voice.maxMs)
++  } catch (err) {}
++}
++// —— 不播插件自带的按压/松开音：只在「点击挂件」这条路径上临时把 soundOn 关掉。
++// playPress/playRelease/playReleaseAt 三个函数都在开头 `if (!soundOn) return`，所以这样最省事，
++// 又不会影响菜单里的音效试听、任务结束音、待答提示音。按下时的挤压动画照旧（在 soundOn 判断之后）。
++var _cfPressDown = pressDown
++var _cfPressUp = pressUp
++pressDown = function () {
++  if (clickFaceCfg()) {
++    var saveOn = soundOn
++    soundOn = false
++    try { return _cfPressDown() } finally { soundOn = saveOn }
++  }
++  return _cfPressDown()
++}
++pressUp = function () {
++  if (clickFaceCfg()) {
++    var saveOn2 = soundOn
++    soundOn = false
++    try { return _cfPressUp() } finally { soundOn = saveOn2 }
++  }
++  return _cfPressUp()
++}
++// —— v7：完成态时长跟「任务结束音」对齐（语音还在响，图就不切回去）——
++var clickFaceDoneAt = 0        // 本轮完成态开始的时间戳
++var clickFaceDoneDur = {}      // 任务结束音 url -> 时长(秒)
++var clickFaceDoneProbe = {}    // url -> 是否已经在探测时长
++// 当前「任务结束音」对应的音频 url（选自定义片段时就是 /dsh-whale/audio-fragment.wav?id=xxx）
++function clickFaceTaskEndUrl() {
++  try {
++    var sel = ''
++    try { if (usageSet && usageSet.taskEnd && usageSet.taskEnd.sel) sel = usageSet.taskEnd.sel } catch (err) {}
++    if (!sel) { try { if (taskEndSel && taskEndSel.value) sel = taskEndSel.value } catch (err) {} }
++    if (sel && sel.indexOf('frag:') === 0) return '/dsh-whale/audio-fragment.wav?id=' + encodeURIComponent(sel.slice(5))
++    if (sel && sel.indexOf('preset:') === 0) {
++      var parts = sel.split(':')
++      var su = soundSlotUrls(parts[2] === 'release' ? 'release' : 'press', parts[1])
++      if (su && su.url) return su.url
++    }
++  } catch (err) {}
++  return ''
++}
++// 完成态该显示多久：至少 doneMs；语音比它长就按「语音时长 + doneTailMs」
++function clickFaceDoneHold(url) {
++  var base = Math.max(200, Number(CLICKFACE.doneMs) || 1000)
++  var tail = Number(CLICKFACE.doneTailMs) || 0
++  try {
++    var d = url ? clickFaceDoneDur[url] : 0
++    if (d > 0) return Math.max(base, Math.round(d * 1000) + tail)
++  } catch (err) {}
++  return base
++}
++// 探测任务结束音时长：拿到后若完成态还在显示，按「已过时间」把剩余时长补足
++function clickFaceProbeDone(url) {
++  try {
++    if (!url || clickFaceDoneDur[url] > 0 || clickFaceDoneProbe[url]) return
++    clickFaceDoneProbe[url] = 1
++    var a = null
++    try { if (typeof dshwvSound === 'function') a = dshwvSound(url) } catch (err) {}
++    if (!a) { try { a = new Audio(url) } catch (err) {} }
++    if (!a) return
++    var take = function () {
++      try {
++        if (!(isFinite(a.duration) && a.duration > 0)) return
++        clickFaceDoneDur[url] = a.duration
++        if (clickFaceFlash && clickFaceDoneAt) {
++          var want = Math.round(a.duration * 1000) + (Number(CLICKFACE.doneTailMs) || 0)
++          var passed = Date.now() - clickFaceDoneAt
++          if (want - passed > 60) clickFaceShow(CLICKFACE.done, want - passed)
++        }
++      } catch (err) {}
++    }
++    try { a.addEventListener('loadedmetadata', take); a.addEventListener('durationchange', take) } catch (err) {}
++    take()
++    try { if (typeof dshwvWarm === 'function') dshwvWarm([url]) } catch (err) {}
++  } catch (err) {}
++}
++// —— 每轮任务结束（宿主 seq 增加、插件播任务结束音的那一刻）→ state4
++var _cfPlayTaskEnd = playTaskEndSound
++playTaskEndSound = function () {
++  try {
++    if (clickFaceCfg()) {
++      clickFaceSendTs = 0        // 本轮结束：清掉「刚发出消息」的兜底思考信号
++      clickFaceHold = false
++      clickFaceFlash = true
++      var _cfDoneUrl = clickFaceTaskEndUrl()
++      clickFaceDoneAt = Date.now()
++      clickFaceShow(CLICKFACE.done, clickFaceDoneHold(_cfDoneUrl))
++      clickFaceProbeDone(_cfDoneUrl)
++    }
++  } catch (err) {}
++  return _cfPlayTaskEnd.apply(this, arguments)
++}
++// —— 思考态轮询（插件自己已有 1s 的轮询，这里另起一个 500ms 的专职看形象）
++setInterval(function () {
++  try {
++    if (!clickFaceCfg()) return
++    if (clickFaceHold || clickFaceFlash) return
++    // v6：打字优先于思考（正在打字说明这一轮已经结束、用户在写下一句）
++    if (clickFaceTyping()) {
++      if (clickFaceShown !== CLICKFACE.typing) clickFaceShow(CLICKFACE.typing, 0)
++      return
++    }
++    var th = clickFaceThinking()
++    if (th) {
++      if (clickFaceShown !== CLICKFACE.thinking) clickFaceShow(CLICKFACE.thinking, 0)
++    } else if (clickFaceShown) {
++      clickFaceReturn()
++    }
++  } catch (err) {}
++}, 500)
++// 预取三张常用状态图 + 预热两条语音，避免第一次点击闪空白
++try {
++  var _cfPreIds = [CLICKFACE.thinking, CLICKFACE.typing, CLICKFACE.done]
++  for (var _pi = 0; _pi < _cfPreIds.length; _pi++) { var _pimg = new Image(); _pimg.src = clickFaceRoleUrl(_cfPreIds[_pi]) }
++  for (var _ci = 0; _ci < (CLICKFACE.clicks || []).length; _ci++) { var _cimg = new Image(); _cimg.src = clickFaceRoleUrl(CLICKFACE.clicks[_ci].state) }
++} catch (err) {}
++try {
++  var _cfWarm = []
++  for (var _vi = 0; _vi < (CLICKFACE.clicks || []).length; _vi++) { var _vv = CLICKFACE.clicks[_vi].voice; if (_vv && _vv.url) _cfWarm.push(_vv.url) }
++  if (typeof dshwvWarm === 'function' && _cfWarm.length) dshwvWarm(_cfWarm)
++} catch (err) {}
++
+ var roleList = []
+ function loadRoles() {
+   try {
+@@ -19981,6 +20324,8 @@
+         // 恢复上次选择的角色
+         var saved = ''
+         try { saved = localStorage.getItem('dshw-role') || '' } catch (err) {}
++        // 补丁：未记录 / 旧默认(default) 一律视为未选择，交给 autoRole
++        if (CLICKFACE.autoRole && (saved === '' || saved === 'default')) saved = CLICKFACE.autoRole
+         var found = null
+         for (var i = 0; i < roleList.length; i++) {
+           if (roleList[i].id === saved) { found = roleList[i]; break }
+@@ -19990,8 +20335,20 @@
+           if (currentRole.id !== found.id) applyRole(found.id, found.name, found.url)
+           else renderRolePanel()
+         } else if (saved && saved !== 'default') {
+-          // 保存的角色已被删除：回退默认鲸鱼娘
+-          applyRole('default', '小鲸鱼', IMG_URL)
++          // 保存的角色已被删除：回退默认鲸鱼娘（补丁：有 clickface 首选角色时回退到它）
++          var _fbRole = null
++          for (var _fi = 0; _fi < roleList.length; _fi++) {
++            if (roleList[_fi].id === CLICKFACE.autoRole) { _fbRole = roleList[_fi]; break }
++          }
++          if (_fbRole) applyRole(_fbRole.id, _fbRole.name, _fbRole.url)
++          else applyRole('default', '小鲸鱼', IMG_URL)
++        } else if (!saved && CLICKFACE.autoRole) {
++          // 补丁：首次进入（尚无角色选择记录）自动选中初始形象
++          var _autoRole = null
++          for (var _ai = 0; _ai < roleList.length; _ai++) {
++            if (roleList[_ai].id === CLICKFACE.autoRole) { _autoRole = roleList[_ai]; break }
++          }
++          if (_autoRole) applyRole(_autoRole.id, _autoRole.name, _autoRole.url)
+         }
+         // 若 saved 为空或为 default：保持当前（initRoleUrl 已是 IMG_URL）
+       })
+@@ -20122,7 +20479,8 @@
+ function renderRolePanel() {
+   try {
+     rolePanel.innerHTML = ''
+-    roleList.forEach(function (r) {
++    // 补丁（v5）：角色选择列表只展示白名单里的角色（state1..5 是状态图，不列出来）
++    clickFaceVisibleRoles(roleList).forEach(function (r) {
+       var item = document.createElement('div')
+       item.className = 'dshwv-roleitem' + (currentRole.id === r.id ? ' dshwv-roleitem-cur' : '')
+       var thumb = document.createElement('img')
+@@ -20209,6 +20567,12 @@
+   confirmCb = null
+ }
+ function deleteRole(id) {
++  // 补丁（v5/v6）：形象机在用的角色受保护，删掉形象机就废了
++  if (clickFaceProtectedRole(id)) {
++    try { alert('「奶蛙」系列角色正在被形象机使用，不能在这里删除。\n要换形象请替换 %USERPROFILE%\.dsh\whale-roles 里的 state0..5.png。') } catch (err) {}
++    return
++  }
++
+   var r = null
+   for (var i = 0; i < roleList.length; i++) if (roleList[i].id === id) { r = roleList[i]; break }
+   showConfirm('确定删除角色「' + (r ? r.name : id) + '」吗？', function () {
+@@ -21972,6 +22336,7 @@
+     // 长按刚唤出菜单:这次抬手不再当作点击(避免顺带弹出余额泡)
+     if (longPressRecent()) return
+     whaleClick()
++    clickFaceSwap()
+     refresh(true)
+     return
+   }

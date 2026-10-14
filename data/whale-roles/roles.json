@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "roles": [
+    {
+      "id": "state0",
+      "name": "奶蛙",
+      "format": "png",
+      "pinnedAt": 1,
+      "createdAt": 1791975372636
+    },
+    {
+      "id": "state1",
+      "name": "奶蛙·大笑",
+      "format": "png",
+      "pinnedAt": null,
+      "createdAt": 1791975372637
+    },
+    {
+      "id": "state2",
+      "name": "安迪",
+      "format": "png",
+      "pinnedAt": null,
+      "createdAt": 1791975372638
+    },
+    {
+      "id": "state3",
+      "name": "奶蛙·思考",
+      "format": "png",
+      "pinnedAt": null,
+      "createdAt": 1791975372639
+    },
+    {
+      "id": "state4",
+      "name": "奶蛙·完成",
+      "format": "png",
+      "pinnedAt": null,
+      "createdAt": 1791975372640
+    },
+    {
+      "id": "state5",
+      "name": "奶蛙·指点",
+      "format": "png",
+      "pinnedAt": null,
+      "createdAt": 1791975372641
+    }
+  ]
+}
